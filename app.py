@@ -34,16 +34,46 @@ def initialize():
                 name TEXT NOT NULL,
                 group_id INTEGER NOT NULL REFERENCES groups(id)
             );
-            CREATE TABLE IF NOT EXISTS attendance (
-                id INTEGER PRIMARY KEY,
-                lab_date TEXT NOT NULL,
-                student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
-                status TEXT NOT NULL CHECK (status IN ('present', 'absent', 'excused')),
-                attended_group_id INTEGER REFERENCES groups(id),
-                UNIQUE (lab_date, student_id)
-            );
             """
         )
+        attendance = db.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'attendance'"
+        ).fetchone()
+        if attendance is None:
+            db.execute(
+                """CREATE TABLE attendance (
+                    id INTEGER PRIMARY KEY,
+                    lab_date TEXT NOT NULL,
+                    student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+                    home_group_id INTEGER NOT NULL REFERENCES groups(id),
+                    status TEXT NOT NULL CHECK (status IN ('planned', 'present', 'absent', 'excused')),
+                    attended_group_id INTEGER REFERENCES groups(id),
+                    UNIQUE (lab_date, student_id)
+                )"""
+            )
+        elif "planned" not in attendance["sql"].lower() or "home_group_id" not in attendance["sql"].lower():
+            with db:
+                db.execute("ALTER TABLE attendance RENAME TO attendance_legacy")
+                db.execute(
+                    """CREATE TABLE attendance (
+                        id INTEGER PRIMARY KEY,
+                        lab_date TEXT NOT NULL,
+                        student_id INTEGER NOT NULL REFERENCES students(id) ON DELETE CASCADE,
+                        home_group_id INTEGER NOT NULL REFERENCES groups(id),
+                        status TEXT NOT NULL CHECK (status IN ('planned', 'present', 'absent', 'excused')),
+                        attended_group_id INTEGER REFERENCES groups(id),
+                        UNIQUE (lab_date, student_id)
+                    )"""
+                )
+                db.execute(
+                    """INSERT INTO attendance
+                       (id, lab_date, student_id, home_group_id, status, attended_group_id)
+                       SELECT a.id, a.lab_date, a.student_id, s.group_id, a.status,
+                              a.attended_group_id
+                       FROM attendance_legacy a
+                       JOIN students s ON s.id = a.student_id"""
+                )
+                db.execute("DROP TABLE attendance_legacy")
 
 
 class RequestError(Exception):
@@ -108,13 +138,13 @@ class Handler(BaseHTTPRequestHandler):
                 if not valid_date(start) or not valid_date(end) or start > end:
                     raise RequestError("Provide a valid date range.")
                 rows = db.execute(
-                    """SELECT a.lab_date, a.student_id, a.status,
+                    """SELECT a.lab_date, a.student_id, a.home_group_id, a.status,
                               a.attended_group_id, s.name AS student_name,
                               home.name AS home_group,
                               attended.name AS attended_group
                        FROM attendance a
                        JOIN students s ON s.id = a.student_id
-                       JOIN groups home ON home.id = s.group_id
+                       JOIN groups home ON home.id = a.home_group_id
                        LEFT JOIN groups attended ON attended.id = a.attended_group_id
                        WHERE a.lab_date BETWEEN ? AND ?
                        ORDER BY a.lab_date, home.name, s.name""",
@@ -153,6 +183,8 @@ class Handler(BaseHTTPRequestHandler):
                 except sqlite3.IntegrityError:
                     raise RequestError("Select an existing group.")
                 return self.send_json({"id": cursor.lastrowid}, 201)
+            if self.path.startswith("/api/students/"):
+                raise RequestError("Method not allowed.", 405)
             if self.path == "/api/attendance":
                 lab_date = payload.get("date")
                 records = payload.get("records")
@@ -163,25 +195,51 @@ class Handler(BaseHTTPRequestHandler):
                         db.execute("DELETE FROM attendance WHERE lab_date = ?", (lab_date,))
                         for record in records:
                             status = record.get("status")
-                            if status not in ("present", "absent", "excused"):
+                            if status not in ("planned", "present", "absent", "excused"):
                                 raise RequestError("Invalid attendance status.")
                             student_id = record.get("student_id")
+                            home_group_id = record.get("home_group_id")
                             attended_group_id = record.get("attended_group_id")
-                            if not isinstance(student_id, int) or (
-                                attended_group_id is not None
-                                and not isinstance(attended_group_id, int)
-                            ):
+                            if not isinstance(student_id, int) or not isinstance(home_group_id, int):
                                 raise RequestError("Invalid student or group.")
+                            if status in ("planned", "present"):
+                                if not isinstance(attended_group_id, int):
+                                    raise RequestError("Select the group the student plans to attend.")
+                            elif attended_group_id is not None:
+                                raise RequestError("Only planned or present students can be assigned a group.")
                             db.execute(
                                 """INSERT INTO attendance
-                                   (lab_date, student_id, status, attended_group_id)
-                                   VALUES (?, ?, ?, ?)""",
-                                (lab_date, student_id, status, attended_group_id),
+                                   (lab_date, student_id, home_group_id, status, attended_group_id)
+                                   VALUES (?, ?, ?, ?, ?)""",
+                                (lab_date, student_id, home_group_id, status, attended_group_id),
                             )
                 except sqlite3.IntegrityError:
                     raise RequestError("A selected student or group does not exist.")
                 return self.send_json({"saved": len(records)})
         self.send_json({"error": "Not found."}, 404)
+
+    def do_PATCH(self):
+        parts = urlparse(self.path).path.split("/")
+        if len(parts) != 4 or parts[1:3] != ["api", "students"]:
+            return self.send_json({"error": "Not found."}, 404)
+        try:
+            student_id = int(parts[3])
+        except ValueError:
+            raise RequestError("Invalid student ID.")
+        group_id = self.body_json().get("group_id")
+        if not isinstance(group_id, int):
+            raise RequestError("Select a group.")
+        with connect() as db:
+            try:
+                cursor = db.execute(
+                    "UPDATE students SET group_id = ? WHERE id = ?",
+                    (group_id, student_id),
+                )
+            except sqlite3.IntegrityError:
+                raise RequestError("Select an existing group.")
+            if cursor.rowcount == 0:
+                raise RequestError("Student not found.", 404)
+        return self.send_json({"updated": student_id, "group_id": group_id})
 
     def do_DELETE(self):
         parts = self.path.split("/")

@@ -77,7 +77,7 @@
         <h2>Lab session</h2>
         <label>Lab date <input type="date" id="lab-date"></label>
       </div>
-      <p class="muted small">Choose each student's status. For students attending with a different group, select the group they joined. Leave unrecorded students blank.</p>
+      <p class="muted small">Mark students as planned before the lab or update them to their actual status afterward. Select the group they plan to attend or attended. Leave unrecorded students blank.</p>
       <div id="attendance-table" class="scroll"></div>
       <div class="row" style="margin-top:14px">
         <button id="save-attendance">Save this session</button>
@@ -105,6 +105,7 @@
           <label>Regular group <select name="group_id" required></select></label>
           <button>Add student</button>
         </form>
+        <p class="muted small">To permanently relocate a student, change their regular group below and select Move. Earlier attendance reports keep their original group.</p>
         <div id="student-list" class="scroll"></div>
         <p id="student-message" class="notice" role="status"></p>
       </div>
@@ -194,10 +195,35 @@
       target.innerHTML = '<p class="empty">No students yet. Add the roster to get started.</p>';
       return;
     }
-    target.innerHTML = `<table><thead><tr><th>Student</th><th>Regular group</th><th></th></tr></thead><tbody>${
-      students.map((student) => `<tr><td>${esc(student.name)}</td><td>${esc(student.group_name)}</td>
+    target.innerHTML = `<table><thead><tr><th>Student</th><th>Regular group</th><th>Permanent move</th><th></th></tr></thead><tbody>${
+      students.map((student) => `<tr data-student="${student.id}">
+        <td>${esc(student.name)}</td><td>${esc(student.group_name)}</td>
+        <td><div class="row">
+          <select class="new-group" aria-label="New regular group for ${esc(student.name)}">
+            ${groups.map((group) => `<option value="${group.id}" ${group.id === student.group_id ? "selected" : ""}>${esc(group.name)}</option>`).join("")}
+          </select>
+          <button class="move-student secondary" data-id="${student.id}" disabled>Move</button>
+        </div></td>
         <td><button class="danger delete-student" data-id="${student.id}" aria-label="Delete ${esc(student.name)}">Remove</button></td></tr>`).join("")
     }</tbody></table>`;
+    target.querySelectorAll("tr[data-student]").forEach((row) => {
+      const select = row.querySelector(".new-group");
+      const move = row.querySelector(".move-student");
+      select.addEventListener("change", () => {
+        move.disabled = Number(select.value) === students.find((student) => student.id === Number(row.dataset.student)).group_id;
+      });
+      move.addEventListener("click", async () => {
+        const student = students.find((item) => item.id === Number(row.dataset.student));
+        if (!confirm(`Permanently move ${student.name} to ${select.selectedOptions[0].text}? Earlier attendance history will be preserved.`)) return;
+        try {
+          await api(`/api/students/${student.id}`, {
+            method:"PATCH", body:JSON.stringify({ group_id:Number(select.value) })
+          });
+          message("#student-message", `${student.name} moved to ${select.selectedOptions[0].text}.`);
+          await refresh();
+        } catch (error) { message("#student-message", error.message, true); }
+      });
+    });
     target.querySelectorAll(".delete-student").forEach((button) => button.addEventListener("click", async () => {
       if (!confirm("Remove this student and their attendance history?")) return;
       try { await api(`/api/students/${button.dataset.id}`, { method:"DELETE" }); await refresh(); }
@@ -225,24 +251,27 @@
     target.innerHTML = `<table><thead><tr><th>Student</th><th>Regular group</th><th>Status</th><th>Attended with group</th></tr></thead><tbody>${
       currentRecords.map(({ student, record }) => {
         const status = record?.status || "";
-        const chosen = record?.attended_group_id || student.group_id;
-        return `<tr data-student="${student.id}">
-          <td>${esc(student.name)}</td><td>${esc(student.group_name)}</td>
+        const chosen = record?.attended_group_id ?? record?.home_group_id ?? student.group_id;
+        const homeGroup = record?.home_group || student.group_name;
+        const canChooseGroup = status === "planned" || status === "present";
+        return `<tr data-student="${student.id}" data-home-group="${record?.home_group_id || student.group_id}">
+          <td>${esc(student.name)}</td><td>${esc(homeGroup)}</td>
           <td><select class="status" aria-label="Status for ${esc(student.name)}">
             <option value="" ${!status ? "selected" : ""}>Not recorded</option>
+            <option value="planned" ${status === "planned" ? "selected" : ""}>Planned to attend</option>
             <option value="present" ${status === "present" ? "selected" : ""}>Present</option>
             <option value="absent" ${status === "absent" ? "selected" : ""}>Absent</option>
             <option value="excused" ${status === "excused" ? "selected" : ""}>Excused</option>
           </select></td>
-          <td><select class="host" aria-label="Group attended by ${esc(student.name)}" ${status !== "present" ? "disabled" : ""}>
-            ${groups.map((group) => `<option value="${group.id}" ${group.id === chosen ? "selected" : ""}>${esc(group.name)}${group.id === student.group_id ? " (own group)" : ""}</option>`).join("")}
+          <td><select class="host" aria-label="Group planned or attended by ${esc(student.name)}" ${!canChooseGroup ? "disabled" : ""}>
+            ${groups.map((group) => `<option value="${group.id}" ${group.id === chosen ? "selected" : ""}>${esc(group.name)}${group.id === student.group_id ? " (regular group)" : ""}</option>`).join("")}
           </select></td>
         </tr>`;
       }).join("")
     }</tbody></table>`;
     target.querySelectorAll("tr[data-student]").forEach((row) => {
       row.querySelector(".status").addEventListener("change", (event) => {
-        row.querySelector(".host").disabled = event.target.value !== "present";
+        row.querySelector(".host").disabled = !["planned", "present"].includes(event.target.value);
       });
     });
   }
@@ -252,8 +281,9 @@
     const records = [...$("#attendance-table").querySelectorAll("tr[data-student]")]
       .map((row) => ({
         student_id: Number(row.dataset.student),
+        home_group_id: Number(row.dataset.homeGroup),
         status: row.querySelector(".status").value,
-        attended_group_id: row.querySelector(".status").value === "present"
+        attended_group_id: ["planned", "present"].includes(row.querySelector(".status").value)
           ? Number(row.querySelector(".host").value) : null
       }))
       .filter((record) => record.status);
@@ -277,7 +307,10 @@
     const present = records.filter((r) => r.status === "present");
     const visitors = present.filter((r) => r.attended_group_id !== null && r.attended_group_id !== undefined
       && r.attended_group !== r.home_group);
-    return { present, visitors };
+    const plannedVisitors = records.filter((r) => r.status === "planned"
+      && r.attended_group_id !== null && r.attended_group_id !== undefined
+      && r.attended_group !== r.home_group);
+    return { present, visitors, plannedVisitors };
   }
 
   async function generateReport() {
@@ -291,11 +324,12 @@
     reportRange = { start:monday, end };
     try {
       const records = await api(`/api/attendance?from=${monday}&to=${end}`);
-      const { present, visitors } = summaryRows(records);
+      const { present, visitors, plannedVisitors } = summaryRows(records);
       const counts = {
         present: present.length,
         absent: records.filter((r) => r.status === "absent").length,
-        excused: records.filter((r) => r.status === "excused").length
+        excused: records.filter((r) => r.status === "excused").length,
+        planned: records.filter((r) => r.status === "planned").length
       };
       const visitorGroups = new Map();
       visitors.forEach((record) => {
@@ -309,6 +343,17 @@
             ${list.map((r) => `<li>${esc(r.student_name)} <span class="muted">(${esc(r.home_group)} · ${esc(r.lab_date)})</span></li>`).join("")}
           </ul></div>`).join("")}</section>`
         : '<section><h2>Students attending with another group</h2><p class="empty">No cross-group attendance recorded this week.</p></section>';
+      const plannedByGroup = new Map();
+      plannedVisitors.forEach((record) => {
+        if (!plannedByGroup.has(record.attended_group)) plannedByGroup.set(record.attended_group, []);
+        plannedByGroup.get(record.attended_group).push(record);
+      });
+      const plannedSection = plannedVisitors.length
+        ? `<section><h2>Planned to attend with another group (${plannedVisitors.length})</h2>
+          ${[...plannedByGroup].map(([group, list]) => `<div class="visitor"><strong>Plans to join ${esc(group)}</strong><ul>
+            ${list.map((r) => `<li>${esc(r.student_name)} <span class="muted">(${esc(r.home_group)} · ${esc(r.lab_date)})</span></li>`).join("")}
+          </ul></div>`).join("")}</section>`
+        : '<section><h2>Planned to attend with another group</h2><p class="empty">No cross-group plans recorded this week.</p></section>';
       const dates = [...new Set(records.map((r) => r.lab_date))].sort();
       const detail = dates.length ? dates.map((day) => {
         const dayRecords = records.filter((r) => r.lab_date === day);
@@ -319,7 +364,7 @@
         });
         return `<h3 class="group-heading">${esc(day)}</h3>${
           [...byGroup].map(([group, list]) => `<p class="small"><strong>${esc(group)}:</strong> ${
-            list.map((r) => `${esc(r.student_name)} — ${r.status === "present" ? "Present" : r.status === "absent" ? "Absent" : "Excused"}${r.attended_group && r.attended_group !== r.home_group ? ` <span class="badge">OTHER GROUP: ${esc(r.attended_group)}</span>` : ""}`).join("; ")
+            list.map((r) => `${esc(r.student_name)} — ${r.status === "planned" ? "Planned" : r.status === "present" ? "Present" : r.status === "absent" ? "Absent" : "Excused"}${r.attended_group && r.attended_group !== r.home_group ? ` <span class="badge">${r.status === "planned" ? "PLANNED: " : "OTHER GROUP: "}${esc(r.attended_group)}</span>` : ""}`).join("; ")
           }</p>`).join("")
         }`;
       }).join("") : '<p class="empty">No attendance has been recorded for this week.</p>';
@@ -329,11 +374,12 @@
       </header>
       <div class="summary">
         <div class="stat"><strong>${counts.present}</strong>Present</div>
+        <div class="stat"><strong>${counts.planned}</strong>Planned</div>
         <div class="stat"><strong>${counts.absent}</strong>Absent</div>
         <div class="stat"><strong>${counts.excused}</strong>Excused</div>
         <div class="stat"><strong>${visitors.length}</strong>Attended with another group</div>
       </div>
-      ${visitorSection}<section><h2>Participation by lab date and regular group</h2>${detail}</section>`;
+      ${plannedSection}${visitorSection}<section><h2>Participation by lab date and regular group</h2>${detail}</section>`;
       message("#report-message", `${records.length} attendance record${records.length === 1 ? "" : "s"} included.`);
       currentRecords = records;
     } catch (error) {
