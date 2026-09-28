@@ -1,16 +1,15 @@
-import base64
 import hmac
-import json
 import os
 import sqlite3
 from datetime import date
-from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+
+from flask import Flask, g, has_request_context, jsonify, request, send_from_directory
 
 
 ROOT = Path(__file__).parent
 DB_PATH = Path(os.environ.get("DATABASE_PATH", ROOT / "participation.sqlite3"))
+app = Flask(__name__)
 
 
 def connect():
@@ -18,6 +17,21 @@ def connect():
     connection.row_factory = sqlite3.Row
     connection.execute("PRAGMA foreign_keys = ON")
     return connection
+
+
+def request_db():
+    if not has_request_context():
+        return connect()
+    if "database" not in g:
+        g.database = connect()
+    return g.database
+
+
+@app.teardown_appcontext
+def close_database(_error=None):
+    db = g.pop("database", None)
+    if db is not None:
+        db.close()
 
 
 def initialize():
@@ -51,7 +65,10 @@ def initialize():
                     UNIQUE (lab_date, student_id)
                 )"""
             )
-        elif "planned" not in attendance["sql"].lower() or "home_group_id" not in attendance["sql"].lower():
+        elif (
+            "planned" not in attendance["sql"].lower()
+            or "home_group_id" not in attendance["sql"].lower()
+        ):
             with db:
                 db.execute("ALTER TABLE attendance RENAME TO attendance_legacy")
                 db.execute(
@@ -78,203 +95,189 @@ def initialize():
 
 class RequestError(Exception):
     def __init__(self, message, status=400):
+        super().__init__(message)
         self.message = message
         self.status = status
 
 
-class Handler(BaseHTTPRequestHandler):
-    def parse_request(self):
-        if not super().parse_request():
-            return False
-        password = os.environ.get("APP_PASSWORD")
-        if password:
-            authorization = self.headers.get("Authorization", "")
-            try:
-                scheme, encoded = authorization.split(" ", 1)
-                username_password = base64.b64decode(encoded, validate=True).decode()
-                supplied_password = username_password.split(":", 1)[1]
-            except (ValueError, UnicodeDecodeError, IndexError):
-                supplied_password = ""
-                scheme = ""
-            if scheme.lower() != "basic" or not hmac.compare_digest(supplied_password, password):
-                self.send_response(401)
-                self.send_header("WWW-Authenticate", 'Basic realm="Lab participation"')
-                self.send_header("Content-Length", "0")
-                self.end_headers()
-                return False
-        return True
+@app.before_request
+def require_password():
+    password = os.environ.get("APP_PASSWORD")
+    if not password:
+        return None
+    authorization = request.authorization
+    if authorization and authorization.type.lower() == "basic":
+        supplied = authorization.password or ""
+        if hmac.compare_digest(supplied, password):
+            return None
+    response = jsonify(error="Authentication required.")
+    response.status_code = 401
+    response.headers["WWW-Authenticate"] = 'Basic realm="Lab participation"'
+    return response
 
-    def send_json(self, data, status=200):
-        body = json.dumps(data).encode()
-        self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
 
-    def body_json(self):
+@app.errorhandler(RequestError)
+def handle_request_error(error):
+    return jsonify(error=error.message), error.status
+
+
+@app.get("/")
+def index():
+    return send_from_directory(ROOT, "index.html")
+
+
+@app.get("/api/groups")
+def list_groups():
+    with request_db() as db:
+        rows = db.execute("SELECT id, name FROM groups ORDER BY name").fetchall()
+    return jsonify([dict(row) for row in rows])
+
+
+@app.post("/api/groups")
+def create_group():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        raise RequestError("Request body must be a JSON object.")
+    name = clean_text(payload.get("name"))
+    if not name:
+        raise RequestError("Enter a group name.")
+    with request_db() as db:
         try:
-            return json.loads(self.rfile.read(int(self.headers.get("Content-Length", 0))))
-        except (ValueError, json.JSONDecodeError):
-            raise RequestError("Request body must be valid JSON.")
+            cursor = db.execute("INSERT INTO groups (name) VALUES (?)", (name,))
+        except sqlite3.IntegrityError:
+            raise RequestError("That group already exists.")
+    return jsonify(id=cursor.lastrowid, name=name), 201
 
-    def do_GET(self):
-        route = urlparse(self.path)
-        with connect() as db:
-            if route.path == "/api/groups":
-                rows = db.execute("SELECT id, name FROM groups ORDER BY name").fetchall()
-                return self.send_json([dict(row) for row in rows])
-            if route.path == "/api/students":
-                rows = db.execute(
-                    """SELECT s.id, s.name, s.group_id, g.name AS group_name
-                       FROM students s JOIN groups g ON g.id = s.group_id
-                       ORDER BY g.name, s.name"""
-                ).fetchall()
-                return self.send_json([dict(row) for row in rows])
-            if route.path == "/api/attendance":
-                params = parse_qs(route.query)
-                start = params.get("from", [""])[0]
-                end = params.get("to", [""])[0]
-                if not valid_date(start) or not valid_date(end) or start > end:
-                    raise RequestError("Provide a valid date range.")
-                rows = db.execute(
-                    """SELECT a.lab_date, a.student_id, a.home_group_id, a.status,
-                              a.attended_group_id, s.name AS student_name,
-                              home.name AS home_group,
-                              attended.name AS attended_group
-                       FROM attendance a
-                       JOIN students s ON s.id = a.student_id
-                       JOIN groups home ON home.id = a.home_group_id
-                       LEFT JOIN groups attended ON attended.id = a.attended_group_id
-                       WHERE a.lab_date BETWEEN ? AND ?
-                       ORDER BY a.lab_date, home.name, s.name""",
-                    (start, end),
-                ).fetchall()
-                return self.send_json([dict(row) for row in rows])
-        if route.path == "/":
-            return self.serve_file(ROOT / "index.html", "text/html; charset=utf-8")
-        if route.path == "/favicon.ico":
-            self.send_response(204)
-            return self.end_headers()
-        self.send_json({"error": "Not found."}, 404)
 
-    def do_POST(self):
-        payload = self.body_json()
-        with connect() as db:
-            if self.path == "/api/groups":
-                name = clean_text(payload.get("name"))
-                if not name:
-                    raise RequestError("Enter a group name.")
-                try:
-                    cursor = db.execute("INSERT INTO groups (name) VALUES (?)", (name,))
-                except sqlite3.IntegrityError:
-                    raise RequestError("That group already exists.")
-                return self.send_json({"id": cursor.lastrowid, "name": name}, 201)
-            if self.path == "/api/students":
-                name = clean_text(payload.get("name"))
-                group_id = payload.get("group_id")
-                if not name or not isinstance(group_id, int):
-                    raise RequestError("Enter a student name and select a group.")
-                try:
-                    cursor = db.execute(
-                        "INSERT INTO students (name, group_id) VALUES (?, ?)",
-                        (name, group_id),
+@app.get("/api/students")
+def list_students():
+    with request_db() as db:
+        rows = db.execute(
+            """SELECT s.id, s.name, s.group_id, g.name AS group_name
+               FROM students s JOIN groups g ON g.id = s.group_id
+               ORDER BY g.name, s.name"""
+        ).fetchall()
+    return jsonify([dict(row) for row in rows])
+
+
+@app.post("/api/students")
+def create_student():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        raise RequestError("Request body must be a JSON object.")
+    name = clean_text(payload.get("name"))
+    group_id = payload.get("group_id")
+    if not name or not is_int(group_id):
+        raise RequestError("Enter a student name and select a group.")
+    with request_db() as db:
+        try:
+            cursor = db.execute(
+                "INSERT INTO students (name, group_id) VALUES (?, ?)",
+                (name, group_id),
+            )
+        except sqlite3.IntegrityError:
+            raise RequestError("Select an existing group.")
+    return jsonify(id=cursor.lastrowid), 201
+
+
+@app.patch("/api/students/<int:student_id>")
+def move_student(student_id):
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict) or not is_int(payload.get("group_id")):
+        raise RequestError("Select a group.")
+    with request_db() as db:
+        try:
+            cursor = db.execute(
+                "UPDATE students SET group_id = ? WHERE id = ?",
+                (payload["group_id"], student_id),
+            )
+        except sqlite3.IntegrityError:
+            raise RequestError("Select an existing group.")
+        if cursor.rowcount == 0:
+            raise RequestError("Student not found.", 404)
+    return jsonify(updated=student_id, group_id=payload["group_id"])
+
+
+@app.delete("/api/students/<int:student_id>")
+def delete_student(student_id):
+    with request_db() as db:
+        cursor = db.execute("DELETE FROM students WHERE id = ?", (student_id,))
+        if cursor.rowcount == 0:
+            raise RequestError("Student not found.", 404)
+    return jsonify(deleted=student_id)
+
+
+@app.get("/api/attendance")
+def list_attendance():
+    start = request.args.get("from", "")
+    end = request.args.get("to", "")
+    if not valid_date(start) or not valid_date(end) or start > end:
+        raise RequestError("Provide a valid date range.")
+    with request_db() as db:
+        rows = db.execute(
+            """SELECT a.lab_date, a.student_id, a.home_group_id, a.status,
+                      a.attended_group_id, s.name AS student_name,
+                      home.name AS home_group,
+                      attended.name AS attended_group
+               FROM attendance a
+               JOIN students s ON s.id = a.student_id
+               JOIN groups home ON home.id = a.home_group_id
+               LEFT JOIN groups attended ON attended.id = a.attended_group_id
+               WHERE a.lab_date BETWEEN ? AND ?
+               ORDER BY a.lab_date, home.name, s.name""",
+            (start, end),
+        ).fetchall()
+    return jsonify([dict(row) for row in rows])
+
+
+@app.post("/api/attendance")
+def save_attendance():
+    payload = request.get_json(silent=True)
+    if not isinstance(payload, dict):
+        raise RequestError("Request body must be a JSON object.")
+    lab_date = payload.get("date")
+    records = payload.get("records")
+    if not valid_date(lab_date) or not isinstance(records, list):
+        raise RequestError("Provide a valid date and attendance records.")
+    try:
+        with request_db() as db:
+            with db:
+                db.execute("DELETE FROM attendance WHERE lab_date = ?", (lab_date,))
+                for record in records:
+                    if not isinstance(record, dict):
+                        raise RequestError("Each attendance record must be an object.")
+                    status = record.get("status")
+                    if status not in ("planned", "present", "absent", "excused"):
+                        raise RequestError("Invalid attendance status.")
+                    student_id = record.get("student_id")
+                    home_group_id = record.get("home_group_id")
+                    attended_group_id = record.get("attended_group_id")
+                    if not is_int(student_id) or not is_int(home_group_id):
+                        raise RequestError("Invalid student or group.")
+                    if status in ("planned", "present"):
+                        if not is_int(attended_group_id):
+                            raise RequestError("Select the group the student plans to attend.")
+                    elif attended_group_id is not None:
+                        raise RequestError(
+                            "Only planned or present students can be assigned a group."
+                        )
+                    db.execute(
+                        """INSERT INTO attendance
+                           (lab_date, student_id, home_group_id, status, attended_group_id)
+                           VALUES (?, ?, ?, ?, ?)""",
+                        (lab_date, student_id, home_group_id, status, attended_group_id),
                     )
-                except sqlite3.IntegrityError:
-                    raise RequestError("Select an existing group.")
-                return self.send_json({"id": cursor.lastrowid}, 201)
-            if self.path.startswith("/api/students/"):
-                raise RequestError("Method not allowed.", 405)
-            if self.path == "/api/attendance":
-                lab_date = payload.get("date")
-                records = payload.get("records")
-                if not valid_date(lab_date) or not isinstance(records, list):
-                    raise RequestError("Provide a valid date and attendance records.")
-                try:
-                    with db:
-                        db.execute("DELETE FROM attendance WHERE lab_date = ?", (lab_date,))
-                        for record in records:
-                            status = record.get("status")
-                            if status not in ("planned", "present", "absent", "excused"):
-                                raise RequestError("Invalid attendance status.")
-                            student_id = record.get("student_id")
-                            home_group_id = record.get("home_group_id")
-                            attended_group_id = record.get("attended_group_id")
-                            if not isinstance(student_id, int) or not isinstance(home_group_id, int):
-                                raise RequestError("Invalid student or group.")
-                            if status in ("planned", "present"):
-                                if not isinstance(attended_group_id, int):
-                                    raise RequestError("Select the group the student plans to attend.")
-                            elif attended_group_id is not None:
-                                raise RequestError("Only planned or present students can be assigned a group.")
-                            db.execute(
-                                """INSERT INTO attendance
-                                   (lab_date, student_id, home_group_id, status, attended_group_id)
-                                   VALUES (?, ?, ?, ?, ?)""",
-                                (lab_date, student_id, home_group_id, status, attended_group_id),
-                            )
-                except sqlite3.IntegrityError:
-                    raise RequestError("A selected student or group does not exist.")
-                return self.send_json({"saved": len(records)})
-        self.send_json({"error": "Not found."}, 404)
-
-    def do_PATCH(self):
-        parts = urlparse(self.path).path.split("/")
-        if len(parts) != 4 or parts[1:3] != ["api", "students"]:
-            return self.send_json({"error": "Not found."}, 404)
-        try:
-            student_id = int(parts[3])
-        except ValueError:
-            raise RequestError("Invalid student ID.")
-        group_id = self.body_json().get("group_id")
-        if not isinstance(group_id, int):
-            raise RequestError("Select a group.")
-        with connect() as db:
-            try:
-                cursor = db.execute(
-                    "UPDATE students SET group_id = ? WHERE id = ?",
-                    (group_id, student_id),
-                )
-            except sqlite3.IntegrityError:
-                raise RequestError("Select an existing group.")
-            if cursor.rowcount == 0:
-                raise RequestError("Student not found.", 404)
-        return self.send_json({"updated": student_id, "group_id": group_id})
-
-    def do_DELETE(self):
-        parts = self.path.split("/")
-        if len(parts) == 4 and parts[1:3] == ["api", "students"]:
-            try:
-                student_id = int(parts[3])
-            except ValueError:
-                raise RequestError("Invalid student ID.")
-            with connect() as db:
-                cursor = db.execute("DELETE FROM students WHERE id = ?", (student_id,))
-                if cursor.rowcount == 0:
-                    raise RequestError("Student not found.", 404)
-            return self.send_json({"deleted": student_id})
-        self.send_json({"error": "Not found."}, 404)
-
-    def serve_file(self, path, content_type):
-        body = path.read_bytes()
-        self.send_response(200)
-        self.send_header("Content-Type", content_type)
-        self.send_header("Content-Length", str(len(body)))
-        self.end_headers()
-        self.wfile.write(body)
-
-    def handle_one_request(self):
-        try:
-            super().handle_one_request()
-        except RequestError as error:
-            self.send_json({"error": error.message}, error.status)
-
-    def log_message(self, _format, *_args):
-        pass
+    except sqlite3.IntegrityError:
+        raise RequestError("A selected student or group does not exist.")
+    return jsonify(saved=len(records))
 
 
 def clean_text(value):
     return value.strip() if isinstance(value, str) else ""
+
+
+def is_int(value):
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 def valid_date(value):
@@ -286,12 +289,12 @@ def valid_date(value):
         return False
 
 
+initialize()
+
+if "PORT" in os.environ and not os.environ.get("APP_PASSWORD"):
+    raise RuntimeError("Set APP_PASSWORD before starting on a public-facing port.")
+
+
 if __name__ == "__main__":
-    initialize()
-    if "PORT" in os.environ and not os.environ.get("APP_PASSWORD"):
-        raise SystemExit("Set APP_PASSWORD before starting on a public-facing port.")
-    port = int(os.environ.get("PORT", "8000"))
-    host = "0.0.0.0" if "PORT" in os.environ else "127.0.0.1"
-    server = ThreadingHTTPServer((host, port), Handler)
-    print(f"Lab participation tracker listening on port {port}")
-    server.serve_forever()
+    app.run(host="0.0.0.0" if "PORT" in os.environ else "127.0.0.1",
+            port=int(os.environ.get("PORT", "8000")))
