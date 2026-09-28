@@ -1,0 +1,393 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lab participation</title>
+  <style>
+    :root { color-scheme: light; --ink:#172b3a; --muted:#637484; --line:#d9e1e7; --paper:#fff; --bg:#f3f6f8; --blue:#1769aa; --red:#a52b24; }
+    * { box-sizing:border-box }
+    body { margin:0; background:var(--bg); color:var(--ink); font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif }
+    main { max-width:1120px; margin:0 auto; padding:32px 20px 60px }
+    h1,h2,h3,p { margin-top:0 }
+    h1 { margin-bottom:4px; font-size:clamp(1.8rem,4vw,2.5rem) }
+    h2 { font-size:1.25rem; margin-bottom:14px }
+    h3 { font-size:1rem; margin-bottom:8px }
+    .subtitle,.muted { color:var(--muted) }
+    .subtitle { margin-bottom:24px }
+    .tabs { display:flex; gap:8px; margin-bottom:18px }
+    button,.button { border:0; border-radius:7px; padding:9px 14px; background:var(--blue); color:white; font:inherit; font-weight:650; cursor:pointer }
+    button.secondary { background:#e6edf2; color:var(--ink) }
+    button.danger { background:#fff0ee; color:var(--red); padding:5px 9px }
+    button.active { background:var(--ink) }
+    input,select { max-width:100%; border:1px solid #c7d2da; border-radius:6px; padding:8px 10px; background:#fff; color:var(--ink); font:inherit }
+    label { display:grid; gap:4px; font-size:.88rem; font-weight:600 }
+    .panel { padding:20px; margin-bottom:18px; background:var(--paper); border:1px solid var(--line); border-radius:10px; box-shadow:0 2px 8px #172b3a08 }
+    .row { display:flex; align-items:end; flex-wrap:wrap; gap:12px }
+    .row.spread { justify-content:space-between; align-items:center }
+    .row h2 { margin:0 }
+    .stack { display:grid; gap:18px }
+    .hidden { display:none!important }
+    .notice { min-height:1.5em; margin:10px 0 0; color:var(--muted) }
+    .notice.error { color:var(--red) }
+    table { width:100%; border-collapse:collapse; margin-top:12px }
+    th,td { padding:10px 8px; border-bottom:1px solid var(--line); text-align:left; vertical-align:middle }
+    th { color:var(--muted); font-size:.82rem; letter-spacing:.02em }
+    td select { width:100%; min-width:125px }
+    td .host { min-width:140px }
+    .scroll { overflow-x:auto }
+    .badge { display:inline-block; border-radius:4px; padding:2px 7px; background:#fff1d5; color:#7a4b00; font-size:.77rem; font-weight:800; letter-spacing:.025em }
+    .summary { display:grid; grid-template-columns:repeat(auto-fit,minmax(145px,1fr)); gap:10px; margin:18px 0 }
+    .stat { padding:12px; border-radius:8px; background:#f1f5f7 }
+    .stat strong { display:block; font-size:1.4rem }
+    .visitor { padding:12px 14px; margin:8px 0; border-left:4px solid #e1a335; background:#fff8e9 }
+    .visitor strong { color:#714600 }
+    .empty { color:var(--muted); padding:18px 0 }
+    .report-head { border-bottom:2px solid var(--ink); padding-bottom:14px }
+    .report-date { color:var(--muted); margin:0 }
+    .group-heading { margin-top:20px; font-size:1rem }
+    .small { font-size:.88rem }
+    @media(max-width:650px) { main { padding:20px 12px 40px } .panel { padding:15px } th,td { padding:8px 6px } }
+    @media print {
+      body { background:#fff; font-size:11pt }
+      main { max-width:none; padding:0 }
+      .no-print,.tabs,.editor,.notice { display:none!important }
+      .panel { border:0; box-shadow:none; padding:0 }
+      #report-panel { display:block!important }
+      .visitor { break-inside:avoid }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Laboratory participation</h1>
+    <p class="subtitle">Weekly situation · student attendance and participation with other groups</p>
+  </header>
+
+  <nav class="tabs no-print" aria-label="Pages">
+    <button class="active" data-tab="attendance">Record attendance</button>
+    <button class="secondary" data-tab="roster">Groups &amp; students</button>
+    <button class="secondary" data-tab="report">Weekly report</button>
+  </nav>
+
+  <section id="attendance-page" class="page">
+    <div class="panel editor">
+      <div class="row spread">
+        <h2>Lab session</h2>
+        <label>Lab date <input type="date" id="lab-date"></label>
+      </div>
+      <p class="muted small">Choose each student's status. For students attending with a different group, select the group they joined. Leave unrecorded students blank.</p>
+      <div id="attendance-table" class="scroll"></div>
+      <div class="row" style="margin-top:14px">
+        <button id="save-attendance">Save this session</button>
+        <span class="muted small">Saving replaces the attendance entries for this date.</span>
+      </div>
+      <p id="attendance-message" class="notice" role="status"></p>
+    </div>
+  </section>
+
+  <section id="roster-page" class="page hidden">
+    <div class="stack">
+      <div class="panel editor">
+        <h2>Groups</h2>
+        <form id="group-form" class="row">
+          <label>New group <input name="name" placeholder="e.g.  grupa 101" required maxlength="80"></label>
+          <button>Add group</button>
+        </form>
+        <div id="group-list"></div>
+        <p id="group-message" class="notice" role="status"></p>
+      </div>
+      <div class="panel editor">
+        <h2>Students</h2>
+        <form id="student-form" class="row">
+          <label>Student name <input name="name" placeholder="Full name" required maxlength="160"></label>
+          <label>Regular group <select name="group_id" required></select></label>
+          <button>Add student</button>
+        </form>
+        <div id="student-list" class="scroll"></div>
+        <p id="student-message" class="notice" role="status"></p>
+      </div>
+    </div>
+  </section>
+
+  <section id="report-page" class="page hidden">
+    <div class="panel editor">
+      <div class="row">
+        <label>Week starting (Monday) <input id="week-start" type="date"></label>
+        <button id="load-report">Generate report</button>
+        <button id="print-report" class="secondary">Print / save as PDF</button>
+        <button id="export-csv" class="secondary">Export CSV</button>
+      </div>
+      <p id="report-message" class="notice" role="status"></p>
+    </div>
+    <article id="report-panel" class="panel">
+      <p class="empty">Choose a week and generate its report.</p>
+    </article>
+  </section>
+</main>
+<script>
+  const $ = (selector) => document.querySelector(selector);
+  let groups = [];
+  let students = [];
+  let currentRecords = [];
+  let reportRange = null;
+
+  async function api(url, options = {}) {
+    const response = await fetch(url, {
+      ...options,
+      headers: { "Content-Type": "application/json", ...(options.headers || {}) }
+    });
+    const data = response.status === 204 ? null : await response.json();
+    if (!response.ok) throw new Error(data?.error || `Request failed (${response.status})`);
+    return data;
+  }
+
+  function message(selector, text, error = false) {
+    const target = $(selector);
+    target.textContent = text;
+    target.classList.toggle("error", error);
+  }
+
+  function esc(text) {
+    return String(text).replace(/[&<>"']/g, (char) => ({
+      "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;"
+    })[char]);
+  }
+
+  function localDate(date) {
+    const y = date.getFullYear();
+    const m = String(date.getMonth() + 1).padStart(2, "0");
+    const d = String(date.getDate()).padStart(2, "0");
+    return `${y}-${m}-${d}`;
+  }
+
+  function mondayOf(dateValue) {
+    const date = new Date(`${dateValue}T12:00:00`);
+    date.setDate(date.getDate() - (date.getDay() + 6) % 7);
+    return localDate(date);
+  }
+
+  async function refresh() {
+    [groups, students] = await Promise.all([
+      api("/api/groups"), api("/api/students")
+    ]);
+    renderGroups();
+    renderStudents();
+    await loadDay();
+  }
+
+  function renderGroups() {
+    const select = $('#student-form select[name="group_id"]');
+    select.innerHTML = groups.length
+      ? groups.map((group) => `<option value="${group.id}">${esc(group.name)}</option>`).join("")
+      : '<option value="">Add a group first</option>';
+    $('#group-list').innerHTML = groups.length
+      ? `<p class="muted small">Available groups: ${groups.map((g) => esc(g.name)).join(", ")}</p>`
+      : '<p class="empty">No groups yet. Add the lab groups to get started.</p>';
+    $('#student-form button').disabled = groups.length === 0;
+  }
+
+  function renderStudents() {
+    const target = $("#student-list");
+    if (!students.length) {
+      target.innerHTML = '<p class="empty">No students yet. Add the roster to get started.</p>';
+      return;
+    }
+    target.innerHTML = `<table><thead><tr><th>Student</th><th>Regular group</th><th></th></tr></thead><tbody>${
+      students.map((student) => `<tr><td>${esc(student.name)}</td><td>${esc(student.group_name)}</td>
+        <td><button class="danger delete-student" data-id="${student.id}" aria-label="Delete ${esc(student.name)}">Remove</button></td></tr>`).join("")
+    }</tbody></table>`;
+    target.querySelectorAll(".delete-student").forEach((button) => button.addEventListener("click", async () => {
+      if (!confirm("Remove this student and their attendance history?")) return;
+      try { await api(`/api/students/${button.dataset.id}`, { method:"DELETE" }); await refresh(); }
+      catch (error) { message("#student-message", error.message, true); }
+    }));
+  }
+
+  async function loadDay() {
+    const day = $("#lab-date").value;
+    if (!day) return;
+    const records = await api(`/api/attendance?from=${day}&to=${day}`);
+    const byStudent = new Map(records.map((record) => [record.student_id, record]));
+    currentRecords = students.map((student) => ({
+      student, record: byStudent.get(student.id)
+    }));
+    renderAttendance();
+  }
+
+  function renderAttendance() {
+    const target = $("#attendance-table");
+    if (!students.length) {
+      target.innerHTML = '<p class="empty">Add groups and students before recording attendance.</p>';
+      return;
+    }
+    target.innerHTML = `<table><thead><tr><th>Student</th><th>Regular group</th><th>Status</th><th>Attended with group</th></tr></thead><tbody>${
+      currentRecords.map(({ student, record }) => {
+        const status = record?.status || "";
+        const chosen = record?.attended_group_id || student.group_id;
+        return `<tr data-student="${student.id}">
+          <td>${esc(student.name)}</td><td>${esc(student.group_name)}</td>
+          <td><select class="status" aria-label="Status for ${esc(student.name)}">
+            <option value="" ${!status ? "selected" : ""}>Not recorded</option>
+            <option value="present" ${status === "present" ? "selected" : ""}>Present</option>
+            <option value="absent" ${status === "absent" ? "selected" : ""}>Absent</option>
+            <option value="excused" ${status === "excused" ? "selected" : ""}>Excused</option>
+          </select></td>
+          <td><select class="host" aria-label="Group attended by ${esc(student.name)}" ${status !== "present" ? "disabled" : ""}>
+            ${groups.map((group) => `<option value="${group.id}" ${group.id === chosen ? "selected" : ""}>${esc(group.name)}${group.id === student.group_id ? " (own group)" : ""}</option>`).join("")}
+          </select></td>
+        </tr>`;
+      }).join("")
+    }</tbody></table>`;
+    target.querySelectorAll("tr[data-student]").forEach((row) => {
+      row.querySelector(".status").addEventListener("change", (event) => {
+        row.querySelector(".host").disabled = event.target.value !== "present";
+      });
+    });
+  }
+
+  async function saveAttendance() {
+    const day = $("#lab-date").value;
+    const records = [...$("#attendance-table").querySelectorAll("tr[data-student]")]
+      .map((row) => ({
+        student_id: Number(row.dataset.student),
+        status: row.querySelector(".status").value,
+        attended_group_id: row.querySelector(".status").value === "present"
+          ? Number(row.querySelector(".host").value) : null
+      }))
+      .filter((record) => record.status);
+    await api("/api/attendance", {
+      method:"POST", body:JSON.stringify({ date:day, records })
+    });
+    message("#attendance-message", `Saved ${records.length} attendance record${records.length === 1 ? "" : "s"} for ${day}.`);
+  }
+
+  function setPage(page) {
+    document.querySelectorAll(".page").forEach((section) => section.classList.toggle("hidden", section.id !== `${page}-page`));
+    document.querySelectorAll(".tabs button").forEach((button) => {
+      const active = button.dataset.tab === page;
+      button.classList.toggle("active", active);
+      button.classList.toggle("secondary", !active);
+    });
+    if (page === "report") generateReport();
+  }
+
+  function summaryRows(records) {
+    const present = records.filter((r) => r.status === "present");
+    const visitors = present.filter((r) => r.attended_group_id !== null && r.attended_group_id !== undefined
+      && r.attended_group !== r.home_group);
+    return { present, visitors };
+  }
+
+  async function generateReport() {
+    const start = $("#week-start").value;
+    if (!start) return;
+    const monday = mondayOf(start);
+    $("#week-start").value = monday;
+    const endDate = new Date(`${monday}T12:00:00`);
+    endDate.setDate(endDate.getDate() + 6);
+    const end = localDate(endDate);
+    reportRange = { start:monday, end };
+    try {
+      const records = await api(`/api/attendance?from=${monday}&to=${end}`);
+      const { present, visitors } = summaryRows(records);
+      const counts = {
+        present: present.length,
+        absent: records.filter((r) => r.status === "absent").length,
+        excused: records.filter((r) => r.status === "excused").length
+      };
+      const visitorGroups = new Map();
+      visitors.forEach((record) => {
+        const key = record.attended_group;
+        if (!visitorGroups.has(key)) visitorGroups.set(key, []);
+        visitorGroups.get(key).push(record);
+      });
+      const visitorSection = visitors.length
+        ? `<section><h2>Students attending with another group (${visitors.length})</h2>
+          ${[...visitorGroups].map(([group, list]) => `<div class="visitor"><strong>Joined ${esc(group)}</strong><ul>
+            ${list.map((r) => `<li>${esc(r.student_name)} <span class="muted">(${esc(r.home_group)} · ${esc(r.lab_date)})</span></li>`).join("")}
+          </ul></div>`).join("")}</section>`
+        : '<section><h2>Students attending with another group</h2><p class="empty">No cross-group attendance recorded this week.</p></section>';
+      const dates = [...new Set(records.map((r) => r.lab_date))].sort();
+      const detail = dates.length ? dates.map((day) => {
+        const dayRecords = records.filter((r) => r.lab_date === day);
+        const byGroup = new Map();
+        dayRecords.forEach((r) => {
+          if (!byGroup.has(r.home_group)) byGroup.set(r.home_group, []);
+          byGroup.get(r.home_group).push(r);
+        });
+        return `<h3 class="group-heading">${esc(day)}</h3>${
+          [...byGroup].map(([group, list]) => `<p class="small"><strong>${esc(group)}:</strong> ${
+            list.map((r) => `${esc(r.student_name)} — ${r.status === "present" ? "Present" : r.status === "absent" ? "Absent" : "Excused"}${r.attended_group && r.attended_group !== r.home_group ? ` <span class="badge">OTHER GROUP: ${esc(r.attended_group)}</span>` : ""}`).join("; ")
+          }</p>`).join("")
+        }`;
+      }).join("") : '<p class="empty">No attendance has been recorded for this week.</p>';
+      $("#report-panel").innerHTML = `<header class="report-head">
+        <h1>Weekly laboratory participation</h1>
+        <p class="report-date">${esc(monday)} – ${esc(end)}</p>
+      </header>
+      <div class="summary">
+        <div class="stat"><strong>${counts.present}</strong>Present</div>
+        <div class="stat"><strong>${counts.absent}</strong>Absent</div>
+        <div class="stat"><strong>${counts.excused}</strong>Excused</div>
+        <div class="stat"><strong>${visitors.length}</strong>Attended with another group</div>
+      </div>
+      ${visitorSection}<section><h2>Participation by lab date and regular group</h2>${detail}</section>`;
+      message("#report-message", `${records.length} attendance record${records.length === 1 ? "" : "s"} included.`);
+      currentRecords = records;
+    } catch (error) {
+      message("#report-message", error.message, true);
+    }
+  }
+
+  document.querySelectorAll(".tabs button").forEach((button) => button.addEventListener("click", () => setPage(button.dataset.tab)));
+  $("#lab-date").value = localDate(new Date());
+  $("#week-start").value = mondayOf(localDate(new Date()));
+  $("#lab-date").addEventListener("change", () => loadDay().catch((error) => message("#attendance-message", error.message, true)));
+  $("#save-attendance").addEventListener("click", () => saveAttendance().catch((error) => message("#attendance-message", error.message, true)));
+  $("#load-report").addEventListener("click", generateReport);
+  $("#print-report").addEventListener("click", () => window.print());
+  $("#export-csv").addEventListener("click", async () => {
+    try {
+      if (!reportRange) await generateReport();
+      if (!reportRange) return;
+      const records = await api(`/api/attendance?from=${reportRange.start}&to=${reportRange.end}`);
+      const fields = ["lab_date","student_name","home_group","status","attended_group"];
+      const csv = [fields, ...records.map((r) => fields.map((field) => r[field] || ""))]
+        .map((row) => row.map((value) => `"${String(value).replace(/"/g, '""')}"`).join(",")).join("\r\n");
+      const link = document.createElement("a");
+      link.href = URL.createObjectURL(new Blob([csv], { type:"text/csv;charset=utf-8" }));
+      link.download = `lab-participation-${reportRange.start}.csv`;
+      link.click();
+      URL.revokeObjectURL(link.href);
+    } catch (error) { message("#report-message", error.message, true); }
+  });
+
+  $("#group-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const name = new FormData(event.currentTarget).get("name");
+      await api("/api/groups", { method:"POST", body:JSON.stringify({ name }) });
+      event.currentTarget.reset();
+      message("#group-message", "Group added.");
+      await refresh();
+    } catch (error) { message("#group-message", error.message, true); }
+  });
+  $("#student-form").addEventListener("submit", async (event) => {
+    event.preventDefault();
+    try {
+      const form = new FormData(event.currentTarget);
+      await api("/api/students", { method:"POST", body:JSON.stringify({
+        name:form.get("name"), group_id:Number(form.get("group_id"))
+      }) });
+      event.currentTarget.reset();
+      message("#student-message", "Student added.");
+      await refresh();
+    } catch (error) { message("#student-message", error.message, true); }
+  });
+
+  refresh().catch((error) => message("#attendance-message", error.message, true));
+</script>
+</body>
+</html>
